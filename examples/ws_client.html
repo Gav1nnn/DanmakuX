@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DanmakuX 弹幕播放器 Demo</title>
+    <style>
+      :root {
+        --bg0: #0f1224;
+        --bg1: #161b33;
+        --panel: #f7f9ff;
+        --ink: #1b223d;
+        --muted: #69708d;
+        --brand: #1e90ff;
+        --brand2: #0fc2c0;
+        --danger: #d94e4e;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        background:
+          radial-gradient(circle at 20% 20%, rgba(15, 194, 192, 0.16), transparent 35%),
+          radial-gradient(circle at 80% 0%, rgba(30, 144, 255, 0.2), transparent 30%),
+          linear-gradient(140deg, var(--bg0), var(--bg1));
+        color: var(--ink);
+        padding: 24px;
+      }
+
+      .container {
+        max-width: 1120px;
+        margin: 0 auto;
+        display: grid;
+        gap: 16px;
+      }
+
+      .title {
+        color: #ecf2ff;
+        letter-spacing: 0.02em;
+        font-weight: 700;
+        margin: 0 0 4px;
+      }
+
+      .subtitle {
+        margin: 0;
+        color: #c6d0f6;
+        font-size: 14px;
+      }
+
+      .player-card,
+      .panel {
+        border-radius: 18px;
+        overflow: hidden;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.22);
+      }
+
+      .player-card {
+        position: relative;
+        background: #000;
+        aspect-ratio: 16 / 9;
+      }
+
+      .player {
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(180deg, rgba(16, 17, 27, 0.9), rgba(4, 6, 11, 0.95)),
+          repeating-linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.02),
+            rgba(255, 255, 255, 0.02) 2px,
+            transparent 2px,
+            transparent 14px
+          );
+      }
+
+      .video-placeholder {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: rgba(228, 236, 255, 0.5);
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-size: 14px;
+        user-select: none;
+      }
+
+      .danmaku-layer {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        pointer-events: none;
+      }
+
+      .danmaku-item {
+        position: absolute;
+        left: 0;
+        white-space: nowrap;
+        font-weight: 700;
+        font-size: 24px;
+        line-height: 1;
+        color: #ffffff;
+        text-shadow:
+          0 2px 4px rgba(0, 0, 0, 0.8),
+          0 0 6px rgba(0, 0, 0, 0.55);
+        will-change: transform;
+      }
+
+      .panel {
+        background: var(--panel);
+        padding: 16px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto;
+        gap: 10px;
+      }
+
+      .row + .row {
+        margin-top: 10px;
+      }
+
+      .input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #dbe2fb;
+        border-radius: 10px;
+        font-size: 14px;
+        outline: none;
+        transition: border-color 0.15s ease;
+      }
+
+      .input:focus {
+        border-color: var(--brand);
+      }
+
+      .btn {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 16px;
+        color: #fff;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .btn-primary {
+        background: linear-gradient(130deg, var(--brand), #3f75ff);
+      }
+
+      .btn-danger {
+        background: linear-gradient(130deg, var(--danger), #c03434);
+      }
+
+      .status {
+        margin-top: 10px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .log {
+        margin-top: 12px;
+        background: #eef2ff;
+        border-radius: 10px;
+        padding: 10px;
+        max-height: 160px;
+        overflow: auto;
+        color: #37406c;
+        font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .tips {
+        margin-top: 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      @media (max-width: 900px) {
+        body {
+          padding: 14px;
+        }
+        .row {
+          grid-template-columns: 1fr;
+        }
+        .danmaku-item {
+          font-size: 20px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <h1 class="title">DanmakuX 弹幕播放器 Demo</h1>
+        <p class="subtitle">预留视频区 + 实时滚动弹幕（类 B 站效果）</p>
+      </header>
+
+      <section class="player-card">
+        <div class="player"></div>
+        <div class="video-placeholder">VIDEO PLACEHOLDER</div>
+        <div id="danmakuLayer" class="danmaku-layer"></div>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <input id="userId" class="input" value="u-demo" placeholder="用户 ID" />
+          <input id="roomId" class="input" value="room-1" placeholder="房间 ID" />
+          <input id="content" class="input" maxlength="200" placeholder="发送一条弹幕（按 Enter 发送）" />
+          <button id="connectBtn" class="btn btn-primary">连接房间</button>
+          <button id="disconnectBtn" class="btn btn-danger">断开连接</button>
+        </div>
+        <div class="row">
+          <button id="sendBtn" class="btn btn-primary">发送弹幕</button>
+        </div>
+        <div id="status" class="status">状态：未连接</div>
+        <div class="tips">访问建议：通过后端静态路由打开本页 http://127.0.0.1:8080/examples/ws_client.html</div>
+        <div id="log" class="log"></div>
+      </section>
+    </main>
+
+    <script>
+      const logEl = document.getElementById("log");
+      const statusEl = document.getElementById("status");
+      const layerEl = document.getElementById("danmakuLayer");
+      const inputContentEl = document.getElementById("content");
+
+      let ws = null;
+      const laneHeight = 36;
+      let laneLocks = [];
+      const measureCtx = document.createElement("canvas").getContext("2d");
+
+      function appendLog(msg) {
+        const ts = new Date().toLocaleTimeString();
+        logEl.textContent += `[${ts}] ${msg}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function setStatus(text) {
+        statusEl.textContent = `状态：${text}`;
+      }
+
+      function getBaseHttp() {
+        if (location.protocol === "http:" || location.protocol === "https:") {
+          return location.origin;
+        }
+        return "http://127.0.0.1:8080";
+      }
+
+      function getBaseWs() {
+        if (location.protocol === "https:") {
+          return `wss://${location.host}`;
+        }
+        if (location.protocol === "http:") {
+          return `ws://${location.host}`;
+        }
+        return "ws://127.0.0.1:8080";
+      }
+
+      function pickLane(nowMs) {
+        const laneCount = Math.max(1, Math.floor(layerEl.clientHeight / laneHeight));
+        if (laneLocks.length !== laneCount) {
+          laneLocks = new Array(laneCount).fill(0);
+        }
+        for (let i = 0; i < laneCount; i += 1) {
+          if (laneLocks[i] <= nowMs) {
+            return i;
+          }
+        }
+        let minIndex = 0;
+        for (let i = 1; i < laneLocks.length; i += 1) {
+          if (laneLocks[i] < laneLocks[minIndex]) {
+            minIndex = i;
+          }
+        }
+        return minIndex;
+      }
+
+      function renderDanmaku(text) {
+        if (!text) return;
+        const now = Date.now();
+        const lane = pickLane(now);
+        const item = document.createElement("div");
+        item.className = "danmaku-item";
+        item.textContent = text;
+        item.style.top = `${lane * laneHeight + 6}px`;
+        layerEl.appendChild(item);
+
+        measureCtx.font = getComputedStyle(item).font;
+        const textWidth = Math.ceil(measureCtx.measureText(text).width);
+        const containerWidth = layerEl.clientWidth;
+        const speedPxPerSec = 120 + Math.random() * 40;
+        const totalDistance = containerWidth + textWidth + 40;
+        const duration = (totalDistance / speedPxPerSec) * 1000;
+        laneLocks[lane] = now + duration * 0.35;
+
+        const animation = item.animate(
+          [
+            { transform: `translateX(${containerWidth + 8}px)` },
+            { transform: `translateX(-${textWidth + 40}px)` },
+          ],
+          { duration, easing: "linear", fill: "forwards" },
+        );
+        animation.onfinish = () => item.remove();
+      }
+
+      async function connect() {
+        const userId = document.getElementById("userId").value.trim();
+        const roomId = document.getElementById("roomId").value.trim();
+        if (!userId || !roomId) {
+          appendLog("user_id 和 room_id 不能为空");
+          return;
+        }
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
+
+        const authResp = await fetch(`${getBaseHttp()}/api/v1/auth/guest`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userId }),
+        });
+        if (!authResp.ok) {
+          appendLog(`获取 token 失败: HTTP ${authResp.status}`);
+          return;
+        }
+
+        const authData = await authResp.json();
+        const wsURL = `${getBaseWs()}/ws?room_id=${encodeURIComponent(roomId)}&token=${encodeURIComponent(authData.token)}`;
+        ws = new WebSocket(wsURL);
+        setStatus("连接中...");
+
+        ws.onopen = () => {
+          setStatus(`已连接（房间 ${roomId}）`);
+          appendLog(`connected: ${wsURL}`);
+        };
+
+        ws.onmessage = (evt) => {
+          let data;
+          try {
+            data = JSON.parse(evt.data);
+          } catch {
+            appendLog(`收到非 JSON 消息: ${evt.data}`);
+            return;
+          }
+
+          if (data.type === "danmaku") {
+            renderDanmaku(data.content);
+            return;
+          }
+          if (data.type === "error") {
+            appendLog(`服务端错误: ${data.error}`);
+            return;
+          }
+          if (data.type === "pong") {
+            return;
+          }
+          appendLog(`收到消息: ${evt.data}`);
+        };
+
+        ws.onerror = () => {
+          appendLog("WebSocket error");
+        };
+
+        ws.onclose = () => {
+          setStatus("已断开");
+          appendLog("connection closed");
+        };
+      }
+
+      function disconnect() {
+        if (!ws) return;
+        ws.close();
+      }
+
+      function sendDanmaku() {
+        const content = inputContentEl.value.trim();
+        if (!content) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          appendLog("当前未连接，无法发送");
+          return;
+        }
+
+        ws.send(JSON.stringify({ type: "danmaku", content }));
+        inputContentEl.value = "";
+      }
+
+      document.getElementById("connectBtn").addEventListener("click", connect);
+      document.getElementById("disconnectBtn").addEventListener("click", disconnect);
+      document.getElementById("sendBtn").addEventListener("click", sendDanmaku);
+      inputContentEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          sendDanmaku();
+        }
+      });
+    </script>
+  </body>
+</html>

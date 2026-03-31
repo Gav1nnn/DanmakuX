@@ -1,0 +1,10 @@
+# binaries
+bin/
+danmakux
+danmuna
+
+# local env
+.env
+
+# macOS
+.DS_Store
