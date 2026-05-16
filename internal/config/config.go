@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Config stores application runtime configuration.
+// Config 汇总服务运行所需的全部配置。
 type Config struct {
 	Server ServerConfig
 	MySQL  MySQLConfig
@@ -16,6 +16,7 @@ type Config struct {
 	Limit  LimitConfig
 }
 
+// ServerConfig 定义 HTTP 与 WebSocket 连接相关配置。
 type ServerConfig struct {
 	HTTPAddr           string
 	NodeID             string
@@ -27,6 +28,7 @@ type ServerConfig struct {
 	MaxMessageSizeByte int64
 }
 
+// MySQLConfig 定义 MySQL 连接池与 DSN 配置。
 type MySQLConfig struct {
 	DSN          string
 	MaxOpenConns int
@@ -34,17 +36,20 @@ type MySQLConfig struct {
 	MaxLifeTime  time.Duration
 }
 
+// RedisConfig 定义 Redis 连接参数。
 type RedisConfig struct {
 	Addr     string
 	Password string
 	DB       int
 }
 
+// AuthConfig 定义 JWT 鉴权参数。
 type AuthConfig struct {
 	JWTSecret string
 	TokenTTL  time.Duration
 }
 
+// LimitConfig 定义用户/IP/房间三个维度的发送限流策略。
 type LimitConfig struct {
 	UserCount  int
 	UserWindow time.Duration
@@ -54,6 +59,7 @@ type LimitConfig struct {
 	RoomWindow time.Duration
 }
 
+// Load 从环境变量加载配置，并填充默认值。
 func Load() (Config, error) {
 	cfg := Config{
 		Server: ServerConfig{
@@ -97,6 +103,7 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// getEnv 读取字符串环境变量，未设置时返回回退值。
 func getEnv(key, fallback string) string {
 	v := os.Getenv(key)
 	if v == "" {
@@ -105,6 +112,7 @@ func getEnv(key, fallback string) string {
 	return v
 }
 
+// getEnvInt 读取 int 类型环境变量，解析失败时返回回退值。
 func getEnvInt(key string, fallback int) int {
 	v := os.Getenv(key)
 	if v == "" {
@@ -117,6 +125,7 @@ func getEnvInt(key string, fallback int) int {
 	return n
 }
 
+// getEnvInt64 读取 int64 类型环境变量，解析失败时返回回退值。
 func getEnvInt64(key string, fallback int64) int64 {
 	v := os.Getenv(key)
 	if v == "" {
@@ -129,6 +138,7 @@ func getEnvInt64(key string, fallback int64) int64 {
 	return n
 }
 
+// getEnvDuration 读取 time.Duration 环境变量，格式错误时返回回退值。
 func getEnvDuration(key string, fallback time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {

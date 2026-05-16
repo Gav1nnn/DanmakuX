@@ -21,15 +21,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// authResp 对应鉴权接口返回体。
 type authResp struct {
 	Token string `json:"token"`
 }
 
+// outbound 表示压测客户端发送到服务端的 WebSocket 消息。
 type outbound struct {
 	Type    string `json:"type"`
 	Content string `json:"content"`
 }
 
+// inbound 表示服务端回推的 WebSocket 消息。
 type inbound struct {
 	Type    string `json:"type"`
 	UserID  string `json:"user_id"`
@@ -37,6 +40,7 @@ type inbound struct {
 	Error   string `json:"error"`
 }
 
+// stats 记录压测核心指标，使用原子计数减少锁开销。
 type stats struct {
 	connectedOK    atomic.Int64
 	connectFailed  atomic.Int64
@@ -49,12 +53,14 @@ type stats struct {
 	authReqSuccess atomic.Int64
 }
 
+// errorSamples 用于采样少量错误信息，避免输出过长。
 type errorSamples struct {
 	mu   sync.Mutex
 	max  int
 	list []string
 }
 
+// newErrorSamples 创建错误样本收集器。
 func newErrorSamples(max int) *errorSamples {
 	if max <= 0 {
 		max = 5
@@ -62,6 +68,7 @@ func newErrorSamples(max int) *errorSamples {
 	return &errorSamples{max: max}
 }
 
+// add 添加错误样本，超过上限时忽略。
 func (e *errorSamples) add(s string) {
 	if s == "" {
 		return
@@ -74,6 +81,7 @@ func (e *errorSamples) add(s string) {
 	e.list = append(e.list, s)
 }
 
+// values 返回错误样本副本，避免外部并发读写冲突。
 func (e *errorSamples) values() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -82,12 +90,14 @@ func (e *errorSamples) values() []string {
 	return out
 }
 
+// latencyStore 记录端到端回显延迟（微秒）。
 type latencyStore struct {
 	mu      sync.Mutex
 	values  []int64
 	dropped atomic.Int64
 }
 
+// add 写入一条延迟样本。
 func (l *latencyStore) add(d time.Duration) {
 	us := d.Microseconds()
 	if us < 0 {
@@ -98,6 +108,7 @@ func (l *latencyStore) add(d time.Duration) {
 	l.mu.Unlock()
 }
 
+// snapshot 返回延迟样本快照。
 func (l *latencyStore) snapshot() []int64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -106,6 +117,7 @@ func (l *latencyStore) snapshot() []int64 {
 	return out
 }
 
+// main 启动原生 Go 的 WebSocket 压测流程。
 func main() {
 	var (
 		baseHTTP     = flag.String("base-http", "http://127.0.0.1:8080", "base HTTP url")
@@ -161,7 +173,7 @@ func main() {
 			worker(ctx, idx, *baseHTTP, wsBase, *roomPrefix, *roomCount, *sendInterval, httpClient, &st, &lats, &inflight, errs)
 		}(i)
 
-		// avoid auth spike at startup
+		// 避免所有 goroutine 同时鉴权造成瞬时突刺。
 		time.Sleep(time.Duration(rand.Intn(30)) * time.Millisecond)
 	}
 
@@ -170,6 +182,7 @@ func main() {
 	report(elapsed, &st, &lats, &inflight, errs)
 }
 
+// worker 表示一个并发压测客户端的完整生命周期。
 func worker(
 	ctx context.Context,
 	idx int,
@@ -228,6 +241,7 @@ func worker(
 			switch msg.Type {
 			case "danmaku":
 				st.received.Add(1)
+				// 通过 content 关联发送时间，统计回显延迟。
 				if sentAtAny, ok := inflight.LoadAndDelete(msg.Content); ok {
 					if sentAt, ok2 := sentAtAny.(time.Time); ok2 {
 						lats.add(time.Since(sentAt))
@@ -271,6 +285,7 @@ func worker(
 	}
 }
 
+// getToken 通过游客接口申请 JWT。
 func getToken(ctx context.Context, hc *http.Client, baseHTTP, userID string) (string, error) {
 	payload, _ := json.Marshal(map[string]string{"user_id": userID})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseHTTP, "/")+"/api/v1/auth/guest", bytes.NewReader(payload))
@@ -299,6 +314,7 @@ func getToken(ctx context.Context, hc *http.Client, baseHTTP, userID string) (st
 	return out.Token, nil
 }
 
+// preflight 在压测前检查服务是否可用。
 func preflight(baseHTTP string, hc *http.Client) error {
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(baseHTTP, "/")+"/healthz", nil)
 	if err != nil {
@@ -323,6 +339,7 @@ func preflight(baseHTTP string, hc *http.Client) error {
 	return nil
 }
 
+// inferWSBase 根据 HTTP 基地址推导 WebSocket 基地址。
 func inferWSBase(baseHTTP string) string {
 	u, err := url.Parse(baseHTTP)
 	if err != nil {
@@ -341,6 +358,7 @@ func inferWSBase(baseHTTP string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
+// report 汇总输出压测结果。
 func report(elapsed time.Duration, st *stats, lats *latencyStore, inflight *sync.Map, errs *errorSamples) {
 	inflightCount := int64(0)
 	inflight.Range(func(_, _ any) bool {
@@ -382,6 +400,7 @@ func report(elapsed time.Duration, st *stats, lats *latencyStore, inflight *sync
 	fmt.Printf("latency max: %s\n", formatUS(latVals[len(latVals)-1]))
 }
 
+// percentile 计算排序数组在给定分位点上的值。
 func percentile(sorted []int64, p int) int64 {
 	if len(sorted) == 0 {
 		return 0
@@ -396,6 +415,7 @@ func percentile(sorted []int64, p int) int64 {
 	return sorted[idx]
 }
 
+// formatUS 将微秒值格式化为可读时长。
 func formatUS(us int64) string {
 	return time.Duration(us * int64(time.Microsecond)).String()
 }

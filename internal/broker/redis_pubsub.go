@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// RedisPubSubBroker 基于 Redis Pub/Sub 实现 Broker 接口。
 type RedisPubSubBroker struct {
 	client *redis.Client
 
@@ -18,6 +19,7 @@ type RedisPubSubBroker struct {
 	subIndex uint64
 }
 
+// NewRedisPubSubBroker 创建 Redis 广播实现。
 func NewRedisPubSubBroker(client *redis.Client) *RedisPubSubBroker {
 	return &RedisPubSubBroker{
 		client:  client,
@@ -25,10 +27,12 @@ func NewRedisPubSubBroker(client *redis.Client) *RedisPubSubBroker {
 	}
 }
 
+// channelName 将房间 ID 映射为 Redis 频道名。
 func channelName(roomID string) string {
 	return fmt.Sprintf("dm:room:%s", roomID)
 }
 
+// Publish 把广播消息序列化后发布到对应房间频道。
 func (b *RedisPubSubBroker) Publish(ctx context.Context, msg protocol.BroadcastMessage) error {
 	payload, err := json.Marshal(msg)
 	if err != nil {
@@ -37,6 +41,7 @@ func (b *RedisPubSubBroker) Publish(ctx context.Context, msg protocol.BroadcastM
 	return b.client.Publish(ctx, channelName(msg.RoomID), payload).Err()
 }
 
+// Subscribe 订阅指定房间频道，并在后台协程中持续消费消息。
 func (b *RedisPubSubBroker) Subscribe(ctx context.Context, roomID string, handler Handler) (func() error, error) {
 	pubsub := b.client.Subscribe(ctx, channelName(roomID))
 	if _, err := pubsub.Receive(ctx); err != nil {
@@ -58,6 +63,7 @@ func (b *RedisPubSubBroker) Subscribe(ctx context.Context, roomID string, handle
 				if !ok {
 					return
 				}
+				// 单条消息解码失败时跳过，避免中断整个订阅协程。
 				var payload protocol.BroadcastMessage
 				if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
 					continue
@@ -67,6 +73,7 @@ func (b *RedisPubSubBroker) Subscribe(ctx context.Context, roomID string, handle
 		}
 	}()
 
+	// unsubscribe 需要保证幂等，避免重复 close 引发 panic。
 	unsubscribe := func() error {
 		var closeErr error
 		once.Do(func() {
@@ -90,6 +97,7 @@ func (b *RedisPubSubBroker) Subscribe(ctx context.Context, roomID string, handle
 	}, nil
 }
 
+// Close 关闭 broker 持有的所有订阅。
 func (b *RedisPubSubBroker) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

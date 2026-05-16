@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// TestGenerateAndParseToken 验证令牌生成和解析流程可闭环。
 func TestGenerateAndParseToken(t *testing.T) {
 	secret := "s3cr3t"
 	token, err := GenerateToken(secret, "u1", time.Minute)

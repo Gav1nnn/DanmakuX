@@ -20,9 +20,11 @@ import (
 )
 
 var (
+	// ErrInvalidContent 表示消息内容为空或超长。
 	ErrInvalidContent = errors.New("invalid content")
 )
 
+// RateLimitError 表示命中限流，并携带建议重试时间。
 type RateLimitError struct {
 	Reason     string
 	RetryAfter time.Duration
@@ -32,6 +34,7 @@ func (e RateLimitError) Error() string {
 	return fmt.Sprintf("%s: retry after %s", e.Reason, e.RetryAfter)
 }
 
+// SendRequest 是发送弹幕时所需的业务输入参数。
 type SendRequest struct {
 	UserID  string
 	RoomID  string
@@ -39,6 +42,7 @@ type SendRequest struct {
 	Content string
 }
 
+// MessageService 负责弹幕主流程：校验、限流、发布、持久化。
 type MessageService struct {
 	nodeID string
 	cfg    config.LimitConfig
@@ -57,6 +61,7 @@ type MessageService struct {
 	persistWorkers sync.WaitGroup
 }
 
+// NewMessageService 创建消息服务实例。
 func NewMessageService(
 	nodeID string,
 	cfg config.LimitConfig,
@@ -79,6 +84,7 @@ func NewMessageService(
 	}
 }
 
+// EnsureRoomSubscription 确保某个房间在当前节点已完成 Redis 订阅。
 func (s *MessageService) EnsureRoomSubscription(ctx context.Context, roomID string) error {
 	s.subMu.Lock()
 	if _, ok := s.subscriptions[roomID]; ok {
@@ -87,6 +93,7 @@ func (s *MessageService) EnsureRoomSubscription(ctx context.Context, roomID stri
 	}
 	s.subMu.Unlock()
 
+	// 收到跨节点消息后，仅负责向本节点连接广播。
 	unsub, err := s.broker.Subscribe(ctx, roomID, func(_ context.Context, message protocol.BroadcastMessage) error {
 		s.hub.BroadcastLocal(roomID, protocol.WSOutboundMessage{
 			Type:      "danmaku",
@@ -114,6 +121,7 @@ func (s *MessageService) EnsureRoomSubscription(ctx context.Context, roomID stri
 	return nil
 }
 
+// StartPersistenceWorker 启动异步批量落库 worker。
 func (s *MessageService) StartPersistenceWorker(ctx context.Context, batchSize int, flushInterval time.Duration) {
 	if batchSize <= 0 {
 		batchSize = 50
@@ -142,6 +150,7 @@ func (s *MessageService) StartPersistenceWorker(ctx context.Context, batchSize i
 		for {
 			select {
 			case <-ctx.Done():
+				// 收到退出信号后先冲刷缓存，避免消息丢失。
 				flush()
 				return
 			case <-ticker.C:
@@ -160,6 +169,7 @@ func (s *MessageService) StartPersistenceWorker(ctx context.Context, batchSize i
 	}()
 }
 
+// Send 处理一条弹幕发送请求并发布到广播链路。
 func (s *MessageService) Send(ctx context.Context, req SendRequest) (protocol.BroadcastMessage, error) {
 	content := strings.TrimSpace(req.Content)
 	if content == "" || len(content) > 200 {
@@ -192,15 +202,18 @@ func (s *MessageService) Send(ctx context.Context, req SendRequest) (protocol.Br
 		CreatedAt: msg.Timestamp,
 	}:
 	default:
+		// 持久化通道满时保护实时链路，记录告警并丢弃落库。
 		s.log.Warn("persist channel full, dropping message", zap.String("message_id", msg.MessageID))
 	}
 	return msg, nil
 }
 
+// ListHistory 查询指定房间历史弹幕。
 func (s *MessageService) ListHistory(ctx context.Context, roomID string, limit int, before time.Time) ([]model.Danmaku, error) {
 	return s.repo.ListByRoom(ctx, roomID, limit, before)
 }
 
+// checkLimit 依次执行用户/IP/房间三级限流。
 func (s *MessageService) checkLimit(ctx context.Context, req SendRequest) error {
 	ok, retryAfter, err := s.limiter.Allow(ctx, "lim:user:"+req.UserID, s.cfg.UserCount, s.cfg.UserWindow)
 	if err != nil {
@@ -228,6 +241,7 @@ func (s *MessageService) checkLimit(ctx context.Context, req SendRequest) error 
 	return nil
 }
 
+// Close 关闭持久化 worker 与所有房间订阅。
 func (s *MessageService) Close() error {
 	var firstErr error
 	s.closeOnce.Do(func() {

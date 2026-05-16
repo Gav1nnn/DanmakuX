@@ -238,6 +238,7 @@
       let laneLocks = [];
       const measureCtx = document.createElement("canvas").getContext("2d");
 
+      // appendLog 在控制台区域追加日志并自动滚动到底部。
       function appendLog(msg) {
         const ts = new Date().toLocaleTimeString();
         logEl.textContent += `[${ts}] ${msg}\n`;
@@ -248,6 +249,7 @@
         statusEl.textContent = `状态：${text}`;
       }
 
+      // 页面通过 HTTP 服务打开时，优先复用当前 origin。
       function getBaseHttp() {
         if (location.protocol === "http:" || location.protocol === "https:") {
           return location.origin;
@@ -255,6 +257,7 @@
         return "http://127.0.0.1:8080";
       }
 
+      // 按当前协议推导 ws/wss 基地址。
       function getBaseWs() {
         if (location.protocol === "https:") {
           return `wss://${location.host}`;
@@ -265,6 +268,7 @@
         return "ws://127.0.0.1:8080";
       }
 
+      // 弹幕按“轨道锁”分配，尽量避免同轨道文本重叠。
       function pickLane(nowMs) {
         const laneCount = Math.max(1, Math.floor(layerEl.clientHeight / laneHeight));
         if (laneLocks.length !== laneCount) {
@@ -284,6 +288,7 @@
         return minIndex;
       }
 
+      // renderDanmaku 负责创建 DOM 并执行横向滚动动画。
       function renderDanmaku(text) {
         if (!text) return;
         const now = Date.now();
@@ -312,6 +317,7 @@
         animation.onfinish = () => item.remove();
       }
 
+      // connect 执行“游客鉴权 + 建立 WebSocket 连接”。
       async function connect() {
         const userId = document.getElementById("userId").value.trim();
         const roomId = document.getElementById("roomId").value.trim();
@@ -377,11 +383,13 @@
         };
       }
 
+      // disconnect 主动断开当前连接。
       function disconnect() {
         if (!ws) return;
         ws.close();
       }
 
+      // sendDanmaku 发送一条弹幕上行消息。
       function sendDanmaku() {
         const content = inputContentEl.value.trim();
         if (!content) return;

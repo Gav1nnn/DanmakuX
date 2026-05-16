@@ -10,18 +10,22 @@ import (
 
 var ErrInvalidLimiterResult = errors.New("invalid limiter script result")
 
+// Limiter 抽象限流器接口，返回是否放行和建议重试时间。
 type Limiter interface {
 	Allow(ctx context.Context, key string, limit int, window time.Duration) (allowed bool, retryAfter time.Duration, err error)
 }
 
+// RedisFixedWindowLimiter 使用 Redis + Lua 实现固定窗口限流。
 type RedisFixedWindowLimiter struct {
 	client *redis.Client
 }
 
+// NewRedisFixedWindowLimiter 创建固定窗口限流器。
 func NewRedisFixedWindowLimiter(client *redis.Client) *RedisFixedWindowLimiter {
 	return &RedisFixedWindowLimiter{client: client}
 }
 
+// fixedWindowScript 返回 [是否允许(1/0), 剩余 TTL(ms)]。
 var fixedWindowScript = redis.NewScript(`
 local current = redis.call("INCR", KEYS[1])
 if current == 1 then
@@ -34,6 +38,7 @@ end
 return {1, ttl}
 `)
 
+// Allow 执行 Lua 脚本并解析返回值。
 func (l *RedisFixedWindowLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, time.Duration, error) {
 	res, err := fixedWindowScript.Run(
 		ctx,

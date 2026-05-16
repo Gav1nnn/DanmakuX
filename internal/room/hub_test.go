@@ -6,6 +6,7 @@ import (
 	"github.com/Gav1nnn/DanmakuX/pkg/protocol"
 )
 
+// TestHubJoinLeaveAndBroadcast 验证 Hub 的加入、离开和本地广播行为。
 func TestHubJoinLeaveAndBroadcast(t *testing.T) {
 	hub := NewHub()
 	c1 := &Client{UserID: "u1", RoomID: "r1", send: make(chan protocol.WSOutboundMessage, 4)}

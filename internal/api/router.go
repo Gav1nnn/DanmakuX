@@ -10,26 +10,28 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// RouterDeps 定义了创建路由器所需的依赖项
 type RouterDeps struct {
 	JWTSecret string
 	TokenTTL  time.Duration
 	Message   *service.MessageService
 }
 
+// NewRouter 创建 Gin 路由器并挂载 HTTP/WS 入口。
 func NewRouter(deps RouterDeps, wsHandler gin.HandlerFunc) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Recovery(), gin.Logger())
-
 	router.Static("/examples", "./examples")
-	router.GET("/healthz", func(c *gin.Context) {
+	router.GET("/healthz", func(c *gin.Context) { // 健康检查端点
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
-	router.POST("/api/v1/auth/guest", guestTokenHandler(deps.JWTSecret, deps.TokenTTL))
-	router.GET("/api/v1/rooms/:room_id/messages", historyHandler(deps.Message))
-	router.GET("/ws", wsHandler)
+	router.POST("/api/v1/auth/guest", guestTokenHandler(deps.JWTSecret, deps.TokenTTL)) // 游客登录获取 JWT
+	router.GET("/api/v1/rooms/:room_id/messages", historyHandler(deps.Message))         // 获取弹幕历史记录
+	router.GET("/ws", wsHandler)                                                        // WebSocket 连接端点
 	return router
 }
 
+// guestTokenHandler 处理游客鉴权，签发短期 JWT。
 func guestTokenHandler(secret string, ttl time.Duration) gin.HandlerFunc {
 	type req struct {
 		UserID string `json:"user_id"`
@@ -50,6 +52,7 @@ func guestTokenHandler(secret string, ttl time.Duration) gin.HandlerFunc {
 	}
 }
 
+// historyHandler 查询房间历史弹幕，支持数量和时间游标。
 func historyHandler(messageSrv *service.MessageService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		roomID := c.Param("room_id")
