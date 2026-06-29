@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Gav1nnn/DanmakuX/internal/auth"
+	"github.com/Gav1nnn/DanmakuX/internal/metrics"
 	"github.com/Gav1nnn/DanmakuX/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -15,6 +16,7 @@ type RouterDeps struct {
 	JWTSecret string
 	TokenTTL  time.Duration
 	Message   *service.MessageService
+	Metrics   *metrics.Metrics
 }
 
 // NewRouter 创建 Gin 路由器并挂载 HTTP/WS 入口。
@@ -25,10 +27,22 @@ func NewRouter(deps RouterDeps, wsHandler gin.HandlerFunc) *gin.Engine {
 	router.GET("/healthz", func(c *gin.Context) { // 健康检查端点
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+	router.GET("/metrics", metricsHandler(deps.Metrics))                                // Prometheus 指标端点
 	router.POST("/api/v1/auth/guest", guestTokenHandler(deps.JWTSecret, deps.TokenTTL)) // 游客登录获取 JWT
 	router.GET("/api/v1/rooms/:room_id/messages", historyHandler(deps.Message))         // 获取弹幕历史记录
 	router.GET("/ws", wsHandler)                                                        // WebSocket 连接端点
 	return router
+}
+
+// metricsHandler 输出 Prometheus text exposition 格式的运行指标。
+func metricsHandler(metricsCollector *metrics.Metrics) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if metricsCollector == nil {
+			c.String(http.StatusServiceUnavailable, "metrics collector unavailable\n")
+			return
+		}
+		c.Data(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(metricsCollector.PrometheusText()))
+	}
 }
 
 // guestTokenHandler 处理游客鉴权，签发短期 JWT。

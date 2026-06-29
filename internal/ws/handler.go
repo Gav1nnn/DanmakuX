@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Gav1nnn/DanmakuX/internal/auth"
+	"github.com/Gav1nnn/DanmakuX/internal/metrics"
 	"github.com/Gav1nnn/DanmakuX/internal/room"
 	"github.com/Gav1nnn/DanmakuX/internal/service"
 	"github.com/Gav1nnn/DanmakuX/pkg/protocol"
@@ -21,6 +22,7 @@ type Handler struct {
 	hub           *room.Hub               // 房间管理器
 	messageSrv    *service.MessageService // 消息服务
 	jwtSecret     string                  // JWT 密钥
+	metrics       *metrics.Metrics        // 指标收集器
 	clientCfg     room.ClientConfig       // 客户端配置
 	wsReadBuffer  int                     // WebSocket 读缓冲区大小
 	wsWriteBuffer int                     // WebSocket 写缓冲区大小
@@ -32,6 +34,7 @@ func NewHandler(
 	hub *room.Hub,
 	messageSrv *service.MessageService,
 	jwtSecret string,
+	metricsCollector *metrics.Metrics,
 	clientCfg room.ClientConfig,
 	wsReadBuffer int,
 	wsWriteBuffer int,
@@ -41,6 +44,7 @@ func NewHandler(
 		hub:           hub,
 		messageSrv:    messageSrv,
 		jwtSecret:     jwtSecret,
+		metrics:       metricsCollector,
 		clientCfg:     clientCfg,
 		wsReadBuffer:  wsReadBuffer,
 		wsWriteBuffer: wsWriteBuffer,
@@ -88,6 +92,10 @@ func (h *Handler) ServeWS(c *gin.Context) {
 		return
 	}
 	// 连接建立成功，记录日志并启动读写协程
+	if h.metrics != nil {
+		h.metrics.IncWSConnection()
+		defer h.metrics.DecWSConnection()
+	}
 	h.log.Info("client joined room", zap.String("room_id", roomID), zap.String("user_id", claims.UserID))
 
 	done := make(chan struct{})

@@ -11,6 +11,7 @@ import (
 	"github.com/Gav1nnn/DanmakuX/internal/broker"
 	"github.com/Gav1nnn/DanmakuX/internal/config"
 	"github.com/Gav1nnn/DanmakuX/internal/limiter"
+	"github.com/Gav1nnn/DanmakuX/internal/metrics"
 	"github.com/Gav1nnn/DanmakuX/internal/model"
 	"github.com/Gav1nnn/DanmakuX/internal/repository"
 	"github.com/Gav1nnn/DanmakuX/internal/room"
@@ -52,6 +53,7 @@ type MessageService struct {
 	broker  broker.Broker
 	repo    repository.DanmakuRepository
 	limiter limiter.Limiter
+	metrics *metrics.Metrics
 
 	persistCh chan model.Danmaku
 
@@ -70,6 +72,7 @@ func NewMessageService(
 	br broker.Broker,
 	repo repository.DanmakuRepository,
 	lim limiter.Limiter,
+	metricsCollector *metrics.Metrics,
 ) *MessageService {
 	return &MessageService{
 		nodeID:        nodeID,
@@ -79,6 +82,7 @@ func NewMessageService(
 		broker:        br,
 		repo:          repo,
 		limiter:       lim,
+		metrics:       metricsCollector,
 		persistCh:     make(chan model.Danmaku, 4096),
 		subscriptions: make(map[string]func() error),
 	}
@@ -95,7 +99,8 @@ func (s *MessageService) EnsureRoomSubscription(ctx context.Context, roomID stri
 
 	// 收到跨节点消息后，仅负责向本节点连接广播。
 	unsub, err := s.broker.Subscribe(ctx, roomID, func(_ context.Context, message protocol.BroadcastMessage) error {
-		s.hub.BroadcastLocal(roomID, protocol.WSOutboundMessage{
+		localClients := s.hub.RoomSize(roomID)
+		count := s.hub.BroadcastLocal(roomID, protocol.WSOutboundMessage{
 			Type:      "danmaku",
 			MessageID: message.MessageID,
 			RoomID:    message.RoomID,
@@ -104,6 +109,10 @@ func (s *MessageService) EnsureRoomSubscription(ctx context.Context, roomID stri
 			NodeID:    message.NodeID,
 			Timestamp: message.Timestamp,
 		})
+		if s.metrics != nil {
+			s.metrics.AddMessageBroadcast(count)
+			s.metrics.AddMessageBroadcastDrop(localClients - count)
+		}
 		return nil
 	})
 	if err != nil {
@@ -142,6 +151,9 @@ func (s *MessageService) StartPersistenceWorker(ctx context.Context, batchSize i
 				return
 			}
 			if err := s.repo.SaveBatch(ctx, batch); err != nil {
+				if s.metrics != nil {
+					s.metrics.IncPersistFailed()
+				}
 				s.log.Error("persist batch failed", zap.Error(err), zap.Int("size", len(batch)))
 			}
 			batch = batch[:0]
@@ -173,11 +185,21 @@ func (s *MessageService) StartPersistenceWorker(ctx context.Context, batchSize i
 func (s *MessageService) Send(ctx context.Context, req SendRequest) (protocol.BroadcastMessage, error) {
 	content := strings.TrimSpace(req.Content)
 	if content == "" || len(content) > 200 {
+		if s.metrics != nil {
+			s.metrics.IncMessageInvalid()
+		}
 		return protocol.BroadcastMessage{}, ErrInvalidContent
 	}
 
 	if err := s.checkLimit(ctx, req); err != nil {
+		var rateLimitErr RateLimitError
+		if errors.As(err, &rateLimitErr) && s.metrics != nil {
+			s.metrics.IncMessageRateLimited()
+		}
 		return protocol.BroadcastMessage{}, err
+	}
+	if s.metrics != nil {
+		s.metrics.IncMessageAccepted()
 	}
 
 	msg := protocol.BroadcastMessage{
@@ -192,6 +214,9 @@ func (s *MessageService) Send(ctx context.Context, req SendRequest) (protocol.Br
 	if err := s.broker.Publish(ctx, msg); err != nil {
 		return protocol.BroadcastMessage{}, err
 	}
+	if s.metrics != nil {
+		s.metrics.IncMessagePublished()
+	}
 
 	select {
 	case s.persistCh <- model.Danmaku{
@@ -201,7 +226,13 @@ func (s *MessageService) Send(ctx context.Context, req SendRequest) (protocol.Br
 		Content:   msg.Content,
 		CreatedAt: msg.Timestamp,
 	}:
+		if s.metrics != nil {
+			s.metrics.IncPersistQueued()
+		}
 	default:
+		if s.metrics != nil {
+			s.metrics.IncPersistDropped()
+		}
 		// 持久化通道满时保护实时链路，记录告警并丢弃落库。
 		s.log.Warn("persist channel full, dropping message", zap.String("message_id", msg.MessageID))
 	}

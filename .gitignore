@@ -2,6 +2,7 @@
 bin/
 danmakux
 danmuna
+.gocache/
 
 # local env
 .env
