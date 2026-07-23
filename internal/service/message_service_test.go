@@ -56,10 +56,13 @@ func (b *fakeBroker) subscriptionCounts() (int, int) {
 }
 
 type fakeRepo struct {
+	mu    sync.Mutex
 	saved [][]model.Danmaku
 }
 
 func (r *fakeRepo) SaveBatch(_ context.Context, messages []model.Danmaku) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	cp := append([]model.Danmaku(nil), messages...)
 	r.saved = append(r.saved, cp)
 	return nil
@@ -67,6 +70,16 @@ func (r *fakeRepo) SaveBatch(_ context.Context, messages []model.Danmaku) error 
 
 func (r *fakeRepo) ListByRoom(_ context.Context, _ string, _ int, _ time.Time) ([]model.Danmaku, error) {
 	return nil, nil
+}
+
+func (r *fakeRepo) savedCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	total := 0
+	for _, batch := range r.saved {
+		total += len(batch)
+	}
+	return total
 }
 
 type fakeLimiter struct {
@@ -237,4 +250,91 @@ func TestRoomSubscriptionConcurrentAcquireUsesSingleSubscription(t *testing.T) {
 	if _, unsubscribed := br.subscriptionCounts(); unsubscribed != 1 {
 		t.Fatalf("expected one broker unsubscribe, got %d", unsubscribed)
 	}
+}
+
+func TestPersistenceWorkerFlushesByBatchSizeAndOnClose(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{}
+	svc := newTestService(&fakeBroker{}, repo, fakeLimiter{})
+	svc.StartPersistenceWorker(2, time.Hour)
+
+	for i := 0; i < 3; i++ {
+		if _, err := svc.Send(context.Background(), SendRequest{
+			UserID:  "u1",
+			RoomID:  "room-1",
+			IP:      "127.0.0.1",
+			Content: "hello",
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+
+	if err := svc.Close(); err != nil {
+		t.Fatalf("close service: %v", err)
+	}
+	if got := repo.savedCount(); got != 3 {
+		t.Fatalf("expected 3 persisted messages, got %d", got)
+	}
+}
+
+func TestPersistenceWorkerFlushesByInterval(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{}
+	svc := newTestService(&fakeBroker{}, repo, fakeLimiter{})
+	svc.StartPersistenceWorker(100, 10*time.Millisecond)
+	defer func() {
+		if err := svc.Close(); err != nil {
+			t.Errorf("close service: %v", err)
+		}
+	}()
+
+	if _, err := svc.Send(context.Background(), SendRequest{
+		UserID:  "u1",
+		RoomID:  "room-1",
+		IP:      "127.0.0.1",
+		Content: "hello",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if repo.savedCount() == 1 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("message was not flushed by interval")
+}
+
+func TestSendDuringCloseDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(&fakeBroker{}, &fakeRepo{}, fakeLimiter{})
+	svc.StartPersistenceWorker(50, 10*time.Millisecond)
+
+	const senders = 32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < senders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = svc.Send(context.Background(), SendRequest{
+				UserID:  "u1",
+				RoomID:  "room-1",
+				IP:      "127.0.0.1",
+				Content: "hello",
+			})
+		}()
+	}
+
+	close(start)
+	if err := svc.Close(); err != nil {
+		t.Fatalf("close service: %v", err)
+	}
+	wg.Wait()
 }

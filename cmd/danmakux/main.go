@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -60,7 +59,7 @@ func main() {
 	br := broker.NewRedisPubSubBroker(redisClient)
 	repo := repository.NewGormDanmakuRepository(mysqlDB)
 	msgSrv := service.NewMessageService(cfg.Server.NodeID, cfg.Limit, log, hub, br, repo, lim, metricsCollector)
-	msgSrv.StartPersistenceWorker(ctx, 100, 500*time.Millisecond)
+	msgSrv.StartPersistenceWorker(100, 500*time.Millisecond)
 	defer func() {
 		if err := msgSrv.Close(); err != nil {
 			log.Error("close message service failed", zap.Error(err))
@@ -115,7 +114,9 @@ func main() {
 	}
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("http server shutdown failed", zap.Error(err))
-		os.Exit(1)
+	}
+	if err := msgSrv.Close(); err != nil {
+		log.Error("close message service failed", zap.Error(err))
 	}
 	log.Info("server exited")
 }

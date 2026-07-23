@@ -57,11 +57,17 @@ type MessageService struct {
 
 	persistCh chan model.Danmaku
 
-	subMu          sync.Mutex
-	subscriptions  map[string]*roomSubscription
-	closeOnce      sync.Once
-	persistWorkers sync.WaitGroup
+	persistMu        sync.RWMutex
+	persistClosed    bool
+	persistStartOnce sync.Once
+	persistWorkers   sync.WaitGroup
+
+	subMu         sync.Mutex
+	subscriptions map[string]*roomSubscription
+	closeOnce     sync.Once
 }
+
+const persistenceWriteTimeout = 3 * time.Second
 
 type roomSubscription struct {
 	refs        int
@@ -159,7 +165,7 @@ func (s *MessageService) ReleaseRoomSubscription(roomID string) error {
 }
 
 // StartPersistenceWorker 启动异步批量落库 worker。
-func (s *MessageService) StartPersistenceWorker(ctx context.Context, batchSize int, flushInterval time.Duration) {
+func (s *MessageService) StartPersistenceWorker(batchSize int, flushInterval time.Duration) {
 	if batchSize <= 0 {
 		batchSize = 50
 	}
@@ -167,46 +173,48 @@ func (s *MessageService) StartPersistenceWorker(ctx context.Context, batchSize i
 		flushInterval = 500 * time.Millisecond
 	}
 
-	s.persistWorkers.Add(1)
-	go func() {
-		defer s.persistWorkers.Done()
-		ticker := time.NewTicker(flushInterval)
-		defer ticker.Stop()
+	s.persistStartOnce.Do(func() {
+		s.persistWorkers.Add(1)
+		go func() {
+			defer s.persistWorkers.Done()
+			ticker := time.NewTicker(flushInterval)
+			defer ticker.Stop()
 
-		batch := make([]model.Danmaku, 0, batchSize)
-		flush := func() {
-			if len(batch) == 0 {
-				return
-			}
-			if err := s.repo.SaveBatch(ctx, batch); err != nil {
-				if s.metrics != nil {
-					s.metrics.IncPersistFailed()
-				}
-				s.log.Error("persist batch failed", zap.Error(err), zap.Int("size", len(batch)))
-			}
-			batch = batch[:0]
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				// 收到退出信号后先冲刷缓存，避免消息丢失。
-				flush()
-				return
-			case <-ticker.C:
-				flush()
-			case item, ok := <-s.persistCh:
-				if !ok {
-					flush()
+			batch := make([]model.Danmaku, 0, batchSize)
+			flush := func() {
+				if len(batch) == 0 {
 					return
 				}
-				batch = append(batch, item)
-				if len(batch) >= batchSize {
+
+				writeCtx, cancel := context.WithTimeout(context.Background(), persistenceWriteTimeout)
+				err := s.repo.SaveBatch(writeCtx, batch)
+				cancel()
+				if err != nil {
+					if s.metrics != nil {
+						s.metrics.IncPersistFailed()
+					}
+					s.log.Error("persist batch failed", zap.Error(err), zap.Int("size", len(batch)))
+				}
+				batch = batch[:0]
+			}
+
+			for {
+				select {
+				case <-ticker.C:
 					flush()
+				case item, ok := <-s.persistCh:
+					if !ok {
+						flush()
+						return
+					}
+					batch = append(batch, item)
+					if len(batch) >= batchSize {
+						flush()
+					}
 				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 // Send 处理一条弹幕发送请求并发布到广播链路。
@@ -246,14 +254,30 @@ func (s *MessageService) Send(ctx context.Context, req SendRequest) (protocol.Br
 		s.metrics.IncMessagePublished()
 	}
 
-	select {
-	case s.persistCh <- model.Danmaku{
+	s.enqueuePersistence(model.Danmaku{
 		ID:        msg.MessageID,
 		RoomID:    msg.RoomID,
 		UserID:    msg.UserID,
 		Content:   msg.Content,
 		CreatedAt: msg.Timestamp,
-	}:
+	})
+	return msg, nil
+}
+
+func (s *MessageService) enqueuePersistence(message model.Danmaku) {
+	s.persistMu.RLock()
+	defer s.persistMu.RUnlock()
+
+	if s.persistClosed {
+		if s.metrics != nil {
+			s.metrics.IncPersistDropped()
+		}
+		s.log.Warn("persistence is closed, dropping message", zap.String("message_id", message.ID))
+		return
+	}
+
+	select {
+	case s.persistCh <- message:
 		if s.metrics != nil {
 			s.metrics.IncPersistQueued()
 		}
@@ -262,9 +286,8 @@ func (s *MessageService) Send(ctx context.Context, req SendRequest) (protocol.Br
 			s.metrics.IncPersistDropped()
 		}
 		// 持久化通道满时保护实时链路，记录告警并丢弃落库。
-		s.log.Warn("persist channel full, dropping message", zap.String("message_id", msg.MessageID))
+		s.log.Warn("persist channel full, dropping message", zap.String("message_id", message.ID))
 	}
-	return msg, nil
 }
 
 // ListHistory 查询指定房间历史弹幕。
@@ -304,7 +327,10 @@ func (s *MessageService) checkLimit(ctx context.Context, req SendRequest) error 
 func (s *MessageService) Close() error {
 	var firstErr error
 	s.closeOnce.Do(func() {
+		s.persistMu.Lock()
+		s.persistClosed = true
 		close(s.persistCh)
+		s.persistMu.Unlock()
 		s.persistWorkers.Wait()
 
 		s.subMu.Lock()
