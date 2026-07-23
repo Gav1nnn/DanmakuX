@@ -110,6 +110,9 @@ func main() {
 	// 创建一个新的上下文用于服务器关闭，设置超时时间为 8 秒
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer shutdownCancel()
+	if err := wsHandler.Shutdown(shutdownCtx); err != nil {
+		log.Error("websocket shutdown failed", zap.Error(err))
+	}
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("http server shutdown failed", zap.Error(err))
 		os.Exit(1)

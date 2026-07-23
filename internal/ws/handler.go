@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Gav1nnn/DanmakuX/internal/auth"
@@ -26,6 +27,11 @@ type Handler struct {
 	clientCfg     room.ClientConfig       // 客户端配置
 	wsReadBuffer  int                     // WebSocket 读缓冲区大小
 	wsWriteBuffer int                     // WebSocket 写缓冲区大小
+
+	lifecycleMu sync.Mutex
+	closing     bool
+	clients     map[*room.Client]struct{}
+	active      sync.WaitGroup
 }
 
 // NewHandler 创建 WebSocket 处理器。
@@ -48,11 +54,17 @@ func NewHandler(
 		clientCfg:     clientCfg,
 		wsReadBuffer:  wsReadBuffer,
 		wsWriteBuffer: wsWriteBuffer,
+		clients:       make(map[*room.Client]struct{}),
 	}
 }
 
 // ServeWS 处理 WebSocket 握手、鉴权、入房和资源回收。
 func (h *Handler) ServeWS(c *gin.Context) {
+	if h.isShuttingDown() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "server is shutting down"})
+		return
+	}
+
 	// 从query参数中获取 room_id 和 token
 	roomID := c.Query("room_id")
 	token := c.Query("token")
@@ -82,6 +94,12 @@ func (h *Handler) ServeWS(c *gin.Context) {
 		return
 	}
 	client, clientCtx := room.NewClient(claims.UserID, roomID, c.ClientIP(), conn, h.clientCfg)
+	if !h.registerClient(client) {
+		_ = client.Close()
+		return
+	}
+	defer h.unregisterClient(client)
+
 	if err := h.messageSrv.AcquireRoomSubscription(context.Background(), roomID); err != nil {
 		h.log.Error("subscribe room failed", zap.String("room_id", roomID), zap.Error(err))
 		_ = client.Close()
@@ -159,6 +177,7 @@ func (h *Handler) readPump(ctx context.Context, client *room.Client) {
 // writePump 持续从发送队列取消息写回 WebSocket，并定时发送 ping 保活。
 func (h *Handler) writePump(ctx context.Context, client *room.Client, done chan struct{}) {
 	defer close(done)
+	defer func() { _ = client.Close() }()
 	cfg := client.Config()
 	ticker := time.NewTicker(cfg.PingPeriod)
 	defer ticker.Stop()
@@ -183,4 +202,60 @@ func (h *Handler) writePump(ctx context.Context, client *room.Client, done chan 
 			}
 		}
 	}
+}
+
+// Shutdown 拒绝新连接、关闭活跃连接并等待对应处理协程退出。
+func (h *Handler) Shutdown(ctx context.Context) error {
+	h.lifecycleMu.Lock()
+	h.closing = true
+	clients := make([]*room.Client, 0, len(h.clients))
+	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.lifecycleMu.Unlock()
+
+	for _, client := range clients {
+		_ = client.Close()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		h.active.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (h *Handler) isShuttingDown() bool {
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+	return h.closing
+}
+
+func (h *Handler) registerClient(client *room.Client) bool {
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+	if h.closing {
+		return false
+	}
+	h.clients[client] = struct{}{}
+	h.active.Add(1)
+	return true
+}
+
+func (h *Handler) unregisterClient(client *room.Client) {
+	h.lifecycleMu.Lock()
+	if _, ok := h.clients[client]; !ok {
+		h.lifecycleMu.Unlock()
+		return
+	}
+	delete(h.clients, client)
+	h.lifecycleMu.Unlock()
+	h.active.Done()
 }
