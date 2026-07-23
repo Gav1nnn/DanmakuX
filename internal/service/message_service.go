@@ -58,9 +58,14 @@ type MessageService struct {
 	persistCh chan model.Danmaku
 
 	subMu          sync.Mutex
-	subscriptions  map[string]func() error
+	subscriptions  map[string]*roomSubscription
 	closeOnce      sync.Once
 	persistWorkers sync.WaitGroup
+}
+
+type roomSubscription struct {
+	refs        int
+	unsubscribe func() error
 }
 
 // NewMessageService 创建消息服务实例。
@@ -84,21 +89,22 @@ func NewMessageService(
 		limiter:       lim,
 		metrics:       metricsCollector,
 		persistCh:     make(chan model.Danmaku, 4096),
-		subscriptions: make(map[string]func() error),
+		subscriptions: make(map[string]*roomSubscription),
 	}
 }
 
-// EnsureRoomSubscription 确保某个房间在当前节点已完成 Redis 订阅。
-func (s *MessageService) EnsureRoomSubscription(ctx context.Context, roomID string) error {
+// AcquireRoomSubscription 获取一个房间订阅引用，首个引用负责创建 Redis 订阅。
+func (s *MessageService) AcquireRoomSubscription(ctx context.Context, roomID string) error {
 	s.subMu.Lock()
-	if _, ok := s.subscriptions[roomID]; ok {
-		s.subMu.Unlock()
+	defer s.subMu.Unlock()
+
+	if subscription, ok := s.subscriptions[roomID]; ok {
+		subscription.refs++
 		return nil
 	}
-	s.subMu.Unlock()
 
 	// 收到跨节点消息后，仅负责向本节点连接广播。
-	unsub, err := s.broker.Subscribe(ctx, roomID, func(_ context.Context, message protocol.BroadcastMessage) error {
+	unsubscribe, err := s.broker.Subscribe(ctx, roomID, func(_ context.Context, message protocol.BroadcastMessage) error {
 		localClients := s.hub.RoomSize(roomID)
 		count := s.hub.BroadcastLocal(roomID, protocol.WSOutboundMessage{
 			Type:      "danmaku",
@@ -119,15 +125,37 @@ func (s *MessageService) EnsureRoomSubscription(ctx context.Context, roomID stri
 		return err
 	}
 
-	s.subMu.Lock()
-	defer s.subMu.Unlock()
-	if _, ok := s.subscriptions[roomID]; ok {
-		_ = unsub()
-		return nil
+	s.subscriptions[roomID] = &roomSubscription{
+		refs:        1,
+		unsubscribe: unsubscribe,
 	}
-	s.subscriptions[roomID] = unsub
 	s.log.Info("room subscription ready", zap.String("room_id", roomID))
 	return nil
+}
+
+// ReleaseRoomSubscription 释放一个房间订阅引用，最后一个引用负责取消 Redis 订阅。
+func (s *MessageService) ReleaseRoomSubscription(roomID string) error {
+	s.subMu.Lock()
+	subscription, ok := s.subscriptions[roomID]
+	if !ok {
+		s.subMu.Unlock()
+		return nil
+	}
+
+	subscription.refs--
+	if subscription.refs > 0 {
+		s.subMu.Unlock()
+		return nil
+	}
+
+	delete(s.subscriptions, roomID)
+	s.subMu.Unlock()
+
+	err := subscription.unsubscribe()
+	if err == nil {
+		s.log.Info("room subscription released", zap.String("room_id", roomID))
+	}
+	return err
 }
 
 // StartPersistenceWorker 启动异步批量落库 worker。
@@ -281,12 +309,12 @@ func (s *MessageService) Close() error {
 
 		s.subMu.Lock()
 		defer s.subMu.Unlock()
-		for roomID, unsub := range s.subscriptions {
-			if err := unsub(); err != nil && firstErr == nil {
+		for roomID, subscription := range s.subscriptions {
+			if err := subscription.unsubscribe(); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("unsubscribe %s: %w", roomID, err)
 			}
 		}
-		s.subscriptions = make(map[string]func() error)
+		s.subscriptions = make(map[string]*roomSubscription)
 		if err := s.broker.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}

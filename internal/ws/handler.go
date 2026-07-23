@@ -75,22 +75,19 @@ func (h *Handler) ServeWS(c *gin.Context) {
 			return true
 		},
 	}
-	// 创建客户端对象并加入房间
+	// 创建客户端对象并获取房间订阅，订阅成功后再加入本地房间。
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		h.log.Error("upgrade websocket failed", zap.Error(err))
 		return
 	}
-	// 确保房间订阅成功，如果失败则清理资源并返回错误
 	client, clientCtx := room.NewClient(claims.UserID, roomID, c.ClientIP(), conn, h.clientCfg)
-	h.hub.Join(client)
-	if err := h.messageSrv.EnsureRoomSubscription(context.Background(), roomID); err != nil {
+	if err := h.messageSrv.AcquireRoomSubscription(context.Background(), roomID); err != nil {
 		h.log.Error("subscribe room failed", zap.String("room_id", roomID), zap.Error(err))
-		h.hub.Leave(client)
 		_ = client.Close()
-		_ = conn.Close()
 		return
 	}
+	h.hub.Join(client)
 	// 连接建立成功，记录日志并启动读写协程
 	if h.metrics != nil {
 		h.metrics.IncWSConnection()
@@ -105,6 +102,9 @@ func (h *Handler) ServeWS(c *gin.Context) {
 	_ = client.Close()
 	<-done
 	h.hub.Leave(client)
+	if err := h.messageSrv.ReleaseRoomSubscription(roomID); err != nil {
+		h.log.Error("release room subscription failed", zap.String("room_id", roomID), zap.Error(err))
+	}
 	h.log.Info("client left room", zap.String("room_id", roomID), zap.String("user_id", claims.UserID))
 }
 
