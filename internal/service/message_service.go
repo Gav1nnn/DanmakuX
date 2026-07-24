@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -27,6 +28,7 @@ var (
 
 // RateLimitError 表示命中限流，并携带建议重试时间。
 type RateLimitError struct {
+	Scope      string
 	Reason     string
 	RetryAfter time.Duration
 }
@@ -230,7 +232,7 @@ func (s *MessageService) Send(ctx context.Context, req SendRequest) (protocol.Br
 	if err := s.checkLimit(ctx, req); err != nil {
 		var rateLimitErr RateLimitError
 		if errors.As(err, &rateLimitErr) && s.metrics != nil {
-			s.metrics.IncMessageRateLimited()
+			s.metrics.IncMessageRateLimited(rateLimitErr.Scope)
 		}
 		return protocol.BroadcastMessage{}, err
 	}
@@ -295,32 +297,47 @@ func (s *MessageService) ListHistory(ctx context.Context, roomID string, limit i
 	return s.repo.ListByRoom(ctx, roomID, limit, before)
 }
 
-// checkLimit 依次执行用户/IP/房间三级限流。
+// checkLimit 在一次 Redis Lua 调用中原子执行用户/IP/房间三级限流。
 func (s *MessageService) checkLimit(ctx context.Context, req SendRequest) error {
-	ok, retryAfter, err := s.limiter.Allow(ctx, "lim:user:"+req.UserID, s.cfg.UserCount, s.cfg.UserWindow)
+	roomSlot := base64.RawURLEncoding.EncodeToString([]byte(req.RoomID))
+	decision, err := s.limiter.Allow(ctx, []limiter.Rule{
+		{
+			Scope:  "user",
+			Key:    fmt.Sprintf("lim:{%s}:user:%s", roomSlot, req.UserID),
+			Limit:  s.cfg.UserCount,
+			Window: s.cfg.UserWindow,
+		},
+		{
+			Scope:  "ip",
+			Key:    fmt.Sprintf("lim:{%s}:ip:%s", roomSlot, req.IP),
+			Limit:  s.cfg.IPCount,
+			Window: s.cfg.IPWindow,
+		},
+		{
+			Scope:  "room",
+			Key:    fmt.Sprintf("lim:{%s}:room", roomSlot),
+			Limit:  s.cfg.RoomCount,
+			Window: s.cfg.RoomWindow,
+		},
+	})
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return RateLimitError{Reason: "user limit exceeded", RetryAfter: retryAfter}
+	if decision.Allowed {
+		return nil
 	}
 
-	ok, retryAfter, err = s.limiter.Allow(ctx, "lim:ip:"+req.IP, s.cfg.IPCount, s.cfg.IPWindow)
-	if err != nil {
-		return err
+	reason := decision.RejectedScope + " limit exceeded"
+	switch decision.RejectedScope {
+	case "user", "ip", "room":
+	default:
+		return limiter.ErrInvalidLimiterResult
 	}
-	if !ok {
-		return RateLimitError{Reason: "ip limit exceeded", RetryAfter: retryAfter}
+	return RateLimitError{
+		Scope:      decision.RejectedScope,
+		Reason:     reason,
+		RetryAfter: decision.RetryAfter,
 	}
-
-	ok, retryAfter, err = s.limiter.Allow(ctx, "lim:room:"+req.RoomID, s.cfg.RoomCount, s.cfg.RoomWindow)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return RateLimitError{Reason: "room limit exceeded", RetryAfter: retryAfter}
-	}
-	return nil
 }
 
 // Close 关闭持久化 worker 与所有房间订阅。

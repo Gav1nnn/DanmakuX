@@ -3,12 +3,14 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Gav1nnn/DanmakuX/internal/broker"
 	"github.com/Gav1nnn/DanmakuX/internal/config"
+	"github.com/Gav1nnn/DanmakuX/internal/limiter"
 	"github.com/Gav1nnn/DanmakuX/internal/model"
 	"github.com/Gav1nnn/DanmakuX/internal/room"
 	"github.com/Gav1nnn/DanmakuX/pkg/protocol"
@@ -83,17 +85,41 @@ func (r *fakeRepo) savedCount() int {
 }
 
 type fakeLimiter struct {
-	errByKey map[string]error
+	decision limiter.Decision
+	err      error
 }
 
-func (l fakeLimiter) Allow(_ context.Context, key string, _ int, _ time.Duration) (bool, time.Duration, error) {
-	if err := l.errByKey[key]; err != nil {
-		return false, 1500 * time.Millisecond, err
+func (l fakeLimiter) Allow(_ context.Context, _ []limiter.Rule) (limiter.Decision, error) {
+	if l.err != nil {
+		return limiter.Decision{}, l.err
 	}
-	return true, 0, nil
+	if l.decision == (limiter.Decision{}) {
+		return limiter.Decision{Allowed: true}, nil
+	}
+	return l.decision, nil
 }
 
-func newTestService(br *fakeBroker, repo *fakeRepo, lim fakeLimiter) *MessageService {
+type captureLimiter struct {
+	mu    sync.Mutex
+	calls int
+	rules []limiter.Rule
+}
+
+func (l *captureLimiter) Allow(_ context.Context, rules []limiter.Rule) (limiter.Decision, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls++
+	l.rules = append([]limiter.Rule(nil), rules...)
+	return limiter.Decision{Allowed: true}, nil
+}
+
+func (l *captureLimiter) snapshot() (int, []limiter.Rule) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls, append([]limiter.Rule(nil), l.rules...)
+}
+
+func newTestService(br *fakeBroker, repo *fakeRepo, lim limiter.Limiter) *MessageService {
 	return NewMessageService(
 		"node-test",
 		config.LimitConfig{
@@ -136,8 +162,9 @@ func TestSendReturnsRateLimitError(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestService(&fakeBroker{}, &fakeRepo{}, fakeLimiter{
-		errByKey: map[string]error{
-			"lim:user:u1": RateLimitError{Reason: "user limit exceeded", RetryAfter: time.Second},
+		decision: limiter.Decision{
+			RejectedScope: "user",
+			RetryAfter:    time.Second,
 		},
 	})
 
@@ -154,6 +181,48 @@ func TestSendReturnsRateLimitError(t *testing.T) {
 	}
 	if rateLimitErr.Reason != "user limit exceeded" {
 		t.Fatalf("unexpected reason: %s", rateLimitErr.Reason)
+	}
+}
+
+func TestSendChecksAllLimitScopesInOneCall(t *testing.T) {
+	t.Parallel()
+
+	lim := &captureLimiter{}
+	svc := newTestService(&fakeBroker{}, &fakeRepo{}, lim)
+	if _, err := svc.Send(context.Background(), SendRequest{
+		UserID:  "u1",
+		RoomID:  "room-1",
+		IP:      "127.0.0.1",
+		Content: "hello",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	calls, rules := lim.snapshot()
+	if calls != 1 {
+		t.Fatalf("expected one limiter call, got %d", calls)
+	}
+	if len(rules) != 3 {
+		t.Fatalf("expected three limit rules, got %d", len(rules))
+	}
+
+	expectedScopes := []string{"user", "ip", "room"}
+	hashTag := ""
+	for i, rule := range rules {
+		if rule.Scope != expectedScopes[i] {
+			t.Fatalf("rule %d scope: expected %s, got %s", i, expectedScopes[i], rule.Scope)
+		}
+		tagEnd := strings.IndexByte(rule.Key, '}')
+		tagStart := strings.IndexByte(rule.Key, '{')
+		if tagStart < 0 || tagEnd <= tagStart {
+			t.Fatalf("rule %d has no Redis hash tag: %s", i, rule.Key)
+		}
+		currentTag := rule.Key[tagStart : tagEnd+1]
+		if hashTag == "" {
+			hashTag = currentTag
+		} else if currentTag != hashTag {
+			t.Fatalf("rules use different Redis hash tags: %s and %s", hashTag, currentTag)
+		}
 	}
 }
 

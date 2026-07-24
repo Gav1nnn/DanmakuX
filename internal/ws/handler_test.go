@@ -10,6 +10,7 @@ import (
 	"github.com/Gav1nnn/DanmakuX/internal/auth"
 	"github.com/Gav1nnn/DanmakuX/internal/broker"
 	"github.com/Gav1nnn/DanmakuX/internal/config"
+	"github.com/Gav1nnn/DanmakuX/internal/limiter"
 	"github.com/Gav1nnn/DanmakuX/internal/metrics"
 	"github.com/Gav1nnn/DanmakuX/internal/model"
 	"github.com/Gav1nnn/DanmakuX/internal/room"
@@ -46,8 +47,8 @@ func (shutdownTestRepository) ListByRoom(context.Context, string, int, time.Time
 
 type shutdownTestLimiter struct{}
 
-func (shutdownTestLimiter) Allow(context.Context, string, int, time.Duration) (bool, time.Duration, error) {
-	return true, 0, nil
+func (shutdownTestLimiter) Allow(context.Context, []limiter.Rule) (limiter.Decision, error) {
+	return limiter.Decision{Allowed: true}, nil
 }
 
 func TestHandlerShutdownClosesActiveConnections(t *testing.T) {
